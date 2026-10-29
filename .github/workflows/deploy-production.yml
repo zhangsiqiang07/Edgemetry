@@ -1,0 +1,93 @@
+name: Deploy Edgemetry Production
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'LICENSE']
+  schedule:
+    - cron: '25 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgemetry-production
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: 27d92ca44e3c94d159429ccf9a4482d6
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  deploy:
+    if: github.repository == 'zhangsiqiang07/Edgemetry'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check deployment credential
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_DEPLOY_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo '::error::请在本仓库 Actions Secrets 添加 CF_DEPLOY_API_TOKEN。'
+            exit 1
+          fi
+
+      - name: Sync upstream on daily schedule
+        if: github.event_name == 'schedule'
+        run: |
+          git remote add upstream https://github.com/hayaran/Edgemetry.git
+          git fetch upstream main
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Bind existing database and use one cron trigger
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p='wrangler.jsonc';
+          let c=fs.readFileSync(p,'utf8');
+          c=c.replace(/"database_id"\s*:\s*"[^"]*"\s*,?/g,'');
+          if (!c.includes('"database_name": "edgemetry"')) throw new Error('D1 config changed; review before deploying');
+          c=c.replace('"database_name": "edgemetry"','"database_name": "edgemetry", "database_id": "331d9a60-d33d-4ea8-b884-5f49a187b531"');
+          c=c.replace(/"workers_dev"\s*:\s*(?:true|false)\s*,?/g,'').replace(/"preview_urls"\s*:\s*(?:true|false)\s*,?/g,'');
+          c=c.replace('"name": "edgemetry",','"name": "edgemetry", "workers_dev": false, "preview_urls": false,');
+          c=c.replace(/"crons"\s*:\s*\[[^\]]*\]/,'"crons": ["5 * * * *"]');
+          fs.writeFileSync(p,c);
+          const f='src/index.ts';
+          let s=fs.readFileSync(f,'utf8');
+          const oldDaily="const daily = controller.cron.startsWith('20 0 ');";
+          // The heredoc removes YAML indentation; match code by whitespace instead.
+          const block=/if \(daily\)\s*\{\s*await dailyJob\(env\.DB, now, Number\.isFinite\(retention\) \? retention : 7, cubeEnabled\(env\)\);\s*\} else \{\s*await hourlyJob\(env\.DB, now\);\s*\}/;
+          if (!s.includes(oldDaily) || !block.test(s)) throw new Error('Scheduler changed upstream; review one-cron compatibility before deploying');
+          s=s.replace(oldDaily,'const daily = now.getUTCHours() === 0;');
+          s=s.replace(block,'await hourlyJob(env.DB, now);\n        if (daily) {\n          await dailyJob(env.DB, now, Number.isFinite(retention) ? retention : 7, cubeEnabled(env));\n        }');
+          fs.writeFileSync(f,s);
+          NODE
+
+      - run: npm run typecheck
+
+      - name: Deploy existing Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_DEPLOY_API_TOKEN }}
+        run: npx --no-install wrangler deploy --keep-vars
+
+      - name: Verify live instance
+        run: curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors https://analytics.bluegirls.top/health
