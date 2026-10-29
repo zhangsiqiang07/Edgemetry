@@ -40,3 +40,6 @@ jobs:
       - run: npm run typecheck
 
       - run: npm test
+
+      - name: Verify all-site aggregation
+        run: node scripts/test-aggregate.mjs
