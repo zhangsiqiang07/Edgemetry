@@ -640,6 +640,7 @@ app.get('/api/summary', async (c) => {
       site,
       range,
       filters,
+      components: { current: series, previous: previousSeries },
       totals: summarize(totals),
       previous: previousTotals ? summarize(previousTotals) : null,
       series: {
