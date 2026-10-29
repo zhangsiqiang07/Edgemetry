@@ -41,6 +41,27 @@ it('registers domains idempotently and normalizes www consistently with Edgemetr
   expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sites').first<{n:number}>())?.n).toBe(2);
 });
 
+it('accepts the explicitly authorized aflyblue.cn family but rejects lookalikes', async () => {
+  expect((await sync(['www.aflyblue.cn', 'blog.aflyblue.cn'])).status).toBe(200);
+  expect((await sync(['aflyblue.cn.attacker.example'])).status).toBe(400);
+});
+
+it('discovers a concrete wildcard host only from an authenticated proxy beacon', async () => {
+  const send = (domain: string, token: string) => handleIngest(new Request('https://example.com/em', {
+    method: 'POST', headers: {
+      'user-agent': 'Mozilla/5.0 Chrome/130.0.0.0 Safari/537.36',
+      'cf-connecting-ip': '192.0.2.1',
+      'x-edgemetry-proxy-token': token,
+      'x-edgemetry-site-host': domain,
+    }, body: JSON.stringify({ d: domain, u: 'https://' + domain + '/', n: 'pageview' }),
+  }), bindings);
+  expect((await send('new.aflyblue.cn', 'wrong')).status).toBe(404);
+  expect((await send('outside.example', secret)).status).toBe(404);
+  expect((await send('new.aflyblue.cn', secret)).status).toBe(204);
+  const sites = await env.DB.prepare('SELECT domain FROM sites').all<{domain:string}>();
+  expect(sites.results).toEqual([{ domain: 'new.aflyblue.cn' }]);
+});
+
 it('uses forwarded visitor IP only with the correct proxy credential', async () => {
   await sync(['a.mrqiang.top']);
   const send = (ip: string, token: string) => handleIngest(new Request('https://example.com/em', {
