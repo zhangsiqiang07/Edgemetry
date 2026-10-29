@@ -237,7 +237,7 @@ app.post('/__nginx/sites/sync', async (c) => {
     return c.json({ error: 'invalid domains' }, 400);
   }
   const domains = [...new Set(body.domains.map((d: unknown) => normalizeDomain(String(d))))];
-  if (domains.some((d) => !DOMAIN_PATTERN.test(d) || !(['mrqiang.top', 'aflyblue.cn'].some((suffix) => d === suffix || d.endsWith('.' + suffix))))) {
+  if (domains.some((d) => !DOMAIN_PATTERN.test(d) || !(['mrqiang.top', 'aflyblue.cn', 'foresightx.com.cn'].some((suffix) => d === suffix || d.endsWith('.' + suffix))))) {
     return c.json({ error: 'domain outside permitted scope' }, 400);
   }
   const created: string[] = [];
