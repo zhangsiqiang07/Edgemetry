@@ -561,7 +561,7 @@ function readUrl() {
   if (q.has('metric')) state.metric = q.get('metric');
   if (q.has('tab')) state.tab = q.get('tab');
   if (q.has('cmp')) state.compare = q.get('cmp') === '1';
-  if (q.has('site')) state.site = Number(q.get('site'));
+  if (q.has('site')) state.site = q.get('site') === 'all' ? 'all' : Number(q.get('site'));
   state.filters = parseFilters(q.get('f'));
 }
 
@@ -659,7 +659,73 @@ var freshSummary = false;
 var dimRequest = {};     // dim -> the in-flight request that will fill it
 var summaryRequest = null;
 
+/* all-site aggregation: combine raw components before deriving rates */
+function aggregateMetrics(c) {
+  return {views:c.views, visitors:c.visits, vpv:c.visits ? Math.round(c.views/c.visits*100)/100 : 0,
+    bounce:c.visits ? Math.round(c.bounces/c.visits*1000)/10 : 0,
+    time:c.visits ? Math.round(c.duration/c.visits) : 0};
+}
+function aggregateBuckets(groups) {
+  var result=[];
+  groups.forEach(function (buckets) { buckets.forEach(function (b,i) {
+    var row=result[i] || (result[i]={label:b.label,views:0,visits:0,bounces:0,duration:0});
+    if (row.label!==b.label) throw new Error('Site time buckets do not align; please refresh.');
+    ['views','visits','bounces','duration'].forEach(function(k){row[k]+=b[k];});
+  });});
+  return result;
+}
+function aggregateSummary(items) {
+  var first=items[0];
+  if (!first || items.some(function(x){return !x.components;})) throw new Error('All-site statistics require the latest deployment. Please refresh shortly.');
+  var current=aggregateBuckets(items.map(function(x){return x.components.current;}));
+  var previous=first.components.previous ? aggregateBuckets(items.map(function(x){return x.components.previous;})) : null;
+  function total(rows) {return aggregateMetrics(rows.reduce(function(a,b){['views','visits','bounces','duration'].forEach(function(k){a[k]+=b[k];});return a;},{views:0,visits:0,bounces:0,duration:0}));}
+  function per(rows){if(!rows)return null;var out={};['views','visitors','vpv','bounce','time'].forEach(function(k){out[k]=rows.map(function(b){return aggregateMetrics(b)[k];});});return out;}
+  return {range:first.range,filters:[],totals:total(current),previous:previous ? total(previous) : null,
+    series:{labels:current.map(function(b){return b.label;}),cur:per(current),prev:per(previous && previous.slice(0,current.length))},
+    visitsBasis:'site-sum',meta:{ms:items.reduce(function(n,x){return n+x.meta.ms;},0),colo:first.meta.colo}};
+}
+function mapSitesLimited(sites, fn) {
+  var next=0, results=new Array(sites.length);
+  function worker(){var i=next++;if(i>=sites.length)return Promise.resolve();return fn(sites[i]).then(function(x){results[i]=x;return worker();});}
+  return Promise.all(Array.from({length:Math.min(3,sites.length)},worker)).then(function(){return results;});
+}
+var aggregateRequest=null;
+function loadAggregate() {
+  var key=apiQuery().toString();
+  if (aggregateRequest && aggregateRequest.key===key) return aggregateRequest.promise;
+  if (freshSummary && dataKey===key) return Promise.resolve();
+  dataKey=key;freshSummary=false;
+  var request=mapSitesLimited(state.sites,function(site){var q=new URLSearchParams(key);q.set('site',site.id);q.delete('f');return get('/api/summary?'+q);})
+    .then(function(items){if(state.site!=='all'||dataKey!==key)return;state.summary=aggregateSummary(items);state.aggregateSites=items;state.breakdowns={};state.error=null;freshSummary=true;})
+    .catch(function(err){if(state.site==='all'&&dataKey===key)state.error=err.message;})
+    .finally(function(){if(aggregateRequest&&aggregateRequest.promise===request)aggregateRequest=null;});
+  aggregateRequest={key:key,promise:request};return request;
+}
+function loadAggregateRealtime() {
+  if (state.aggregateLiveRequest) return state.aggregateLiveRequest;
+  var request=mapSitesLimited(state.sites,function(site){return get('/api/realtime?site='+site.id).then(function(x){x.domain=site.domain;return x;});})
+    .then(function(items){if(state.site!=='all')return;
+      var first=items[0];if(!first)return;
+      state.realtime={online:items.reduce(function(n,x){return n+x.online;},0),
+        minutes:first.minutes.map(function(m,i){return {label:m.label,cur:items.reduce(function(n,x){return n+(x.minutes[i] ? x.minutes[i].cur : 0);},0)};}),
+        recent:items.flatMap(function(x){return x.recent.map(function(r){return {ts:r.ts,path:x.domain+r.path,country:r.country};});}).sort(function(a,b){return b.ts-a.ts;}).slice(0,8)};
+      state.aggregateLiveError=false;$('online').textContent=fmt.count(state.realtime.online);paintStream();
+    }).catch(function(){if(state.site==='all'){state.aggregateLiveError=true;state.realtime=null;$('online').textContent='—';paintStream();}})
+    .finally(function(){state.aggregateLiveRequest=null;});
+  state.aggregateLiveRequest=request;return request;
+}
+function aggregateScreen() {
+  var rows=(state.aggregateSites||[]).slice().sort(function(a,b){return b.totals[state.metric]-a.totals[state.metric];});
+  var metric=METRICS.find(function(m){return m.id===state.metric;})||METRICS[0];
+  return '<section class="panel"><div class="panel-head"><span class="cap">全部站点 · '+state.sites.length+'</span></div><p class="lede">访客数与实时在线为各站合计，未跨站去重。跳出率、平均时长和每访客浏览量按原始访问数据加权计算。</p></section>'+heroPanel()+
+    (state.aggregateLiveError ? '<section class="panel"><p class="lede">实时统计暂时不可用，将自动重试。</p></section>' : streamPanel())+
+    '<section class="panel"><div class="panel-head"><span class="cap">域名排名 · '+esc(metric.label)+'</span></div>'+rows.map(function(x,i){return '<button class="row" data-site="'+x.site.id+'" style="width:100%;text-align:left"><span>'+ (i+1)+'. '+esc(x.site.domain)+'</span><span>'+esc(metric.format(x.totals[state.metric]))+'</span></button>';}).join('')+'</section>';
+}
+/* end all-site aggregation */
+
 function load() {
+  if (state.site === 'all') return loadAggregate();
   if (!state.site) return Promise.resolve();
   var key = apiQuery().toString();
 
@@ -727,8 +793,11 @@ function load() {
 }
 
 function loadRealtime() {
+  if (state.site === 'all') return loadAggregateRealtime();
+  var requestedSite = state.site;
   if (!state.site) return Promise.resolve();
   return get('/api/realtime?site=' + state.site).then(function (data) {
+    if (state.site !== requestedSite) return;
     state.realtime = data;
     $('online').textContent = fmt.count(data.online);
     // On the first load this races `refresh()`. Whichever finishes second is
@@ -1117,7 +1186,7 @@ function metricRail() {
 
     return '<button class="metric" data-metric="' + metric.id + '" aria-pressed="' + selected + '" ' +
       'title="' + esc(metric.copy) + '">' +
-      '<span class="left"><span class="label">' + esc(metric.label) + '</span>' +
+      '<span class="left"><span class="label">' + esc(state.site === 'all' && metric.id === 'visitors' ? '访客数（各站合计）' : metric.label) + '</span>' +
       '<span class="value">' + esc(summary ? metric.format(value) : '—') + '</span></span>' +
       '<span class="right"><span class="delta" style="color:' + delta.color + '">' + esc(delta.text) + '</span>' +
       '<span style="width:100%;height:22px">' + sparkline(spark, selected) + '</span></span></button>';
@@ -1580,6 +1649,7 @@ function initials(email) {
 }
 
 state.siteDomain = function () {
+  if (state.site === 'all') return '全部站点';
   var site = state.sites.find(function (s) { return s.id === state.site; });
   return site ? site.domain : 'example.com';
 };
@@ -1607,7 +1677,8 @@ function render() {
 
   var hasTraffic = state.summary && (state.summary.totals.views > 0 || state.summary.totals.visitors > 0);
   var body;
-  if (state.tab === 'Settings') body = settingsScreen();
+  if (state.site === 'all') body = aggregateScreen();
+  else if (state.tab === 'Settings') body = settingsScreen();
   else if (!hasTraffic && !state.loading && !state.filters.length) body = firstRun();
   else if (state.tab === 'Pages') body = pagesScreen();
   else if (state.tab === 'Sources') body = sourcesScreen();
@@ -1640,7 +1711,7 @@ function renderHeader() {
   $('livePill').hidden = config;
   $('strip').hidden = config;
 
-  $('tabs').innerHTML = TABS.map(function (tab) {
+  $('tabs').innerHTML = (state.site === 'all' ? ['Overview'] : TABS).map(function (tab) {
     return '<button class="tab" data-tab="' + tab + '"' +
       (state.tab === tab ? ' aria-current="page"' : '') + '>' + esc(tab) + '</button>';
   }).join('') + '<span class="edge-note" id="edgeNote"></span>';
@@ -1657,7 +1728,7 @@ function renderHeader() {
       '<button data-remove="' + i + '" aria-label="Remove filter">✕</button></span>';
   }).join('');
 
-  $('chipHint').textContent = state.filters.length ? '' : 'click any row to narrow everything at once';
+  $('chipHint').textContent = state.site === 'all' ? '访客与实时在线为各站合计，未跨站去重' : (state.filters.length ? '' : 'click any row to narrow everything at once');
   $('reset').style.opacity = state.filters.length ? '1' : '0';
   $('reset').style.pointerEvents = state.filters.length ? 'auto' : 'none';
 
@@ -1741,7 +1812,9 @@ document.addEventListener('click', function (event) {
 
   var siteBtn = target.closest('[data-site]');
   if (siteBtn) {
-    state.site = Number(siteBtn.dataset.site);
+    state.site = siteBtn.dataset.site === 'all' ? 'all' : Number(siteBtn.dataset.site);
+    state.summary = null; state.realtime = null; state.aggregateSites = [];
+    $('online').textContent = '—'; state.tab = 'Overview';
     state.filters = [];
     closePop();
     return refresh().then(loadRealtime);
@@ -1785,7 +1858,7 @@ function paintPop() {
   // for someone typing a domain into the row below. Carry the text across.
   var pending = $('newDomain') ? $('newDomain').value : '';
 
-  host.innerHTML = state.sites.map(function (site) {
+  host.innerHTML = '<button data-site="all"'+(state.site === 'all' ? ' aria-current="true"' : '')+'><span>全部站点</span><span>汇总与域名排名</span></button>' + state.sites.map(function (site) {
     var stats = state.siteStats[site.id];
     return '<button data-site="' + site.id + '"' +
       (site.id === state.site ? ' aria-current="true"' : '') + '>' +
@@ -2230,7 +2303,7 @@ document.addEventListener('click', function (event) {
       toast(site.domain + ' removed');
       // Removing the site you were looking at moves you to another one, and
       // every number on screen was about the one that just went away.
-      if (!state.sites.some(function (s) { return s.id === state.site; })) {
+      if (state.site !== 'all' && !state.sites.some(function (s) { return s.id === state.site; })) {
         state.site = state.sites.length ? state.sites[0].id : null;
         state.filters = [];
         return refresh().then(loadRealtime);
@@ -2304,6 +2377,7 @@ addEventListener('resize', function () {
 });
 
 readUrl();
+if (state.site === 'all') { state.filters = []; state.tab = 'Overview'; }
 
 Promise.all([get('/api/me'), get('/api/sites')])
   .then(function (results) {
@@ -2312,7 +2386,7 @@ Promise.all([get('/api/me'), get('/api/sites')])
     state.version = results[0].version || '';
     state.update = results[0].update || null;
     state.sites = results[1].sites;
-    if (!state.sites.some(function (s) { return s.id === state.site; })) {
+    if (state.site !== 'all' && !state.sites.some(function (s) { return s.id === state.site; })) {
       state.site = state.sites.length ? state.sites[0].id : null;
     }
 
