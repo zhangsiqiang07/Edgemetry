@@ -11,9 +11,7 @@
 name: demo
 
 on:
-  push:
-    branches: [main]
-  # So the demo can be republished without an empty commit.
+  # Publish the optional demo only when explicitly requested.
   workflow_dispatch:
 
 # Pages needs these; the job itself writes nothing back to the repository.
