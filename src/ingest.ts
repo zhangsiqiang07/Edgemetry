@@ -174,7 +174,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
     .first<{ id: number }>();
 
   // Wildcard Nginx servers discover concrete hosts on their first trusted beacon.
-  const permittedDomain = ['mrqiang.top', 'aflyblue.cn'].some((suffix) => domain === suffix || domain.endsWith('.' + suffix));
+  const permittedDomain = ['mrqiang.top', 'aflyblue.cn', 'foresightx.com.cn'].some((suffix) => domain === suffix || domain.endsWith('.' + suffix));
   const proxyHost = normalizeDomain(request.headers.get('x-edgemetry-site-host') ?? '');
   if (!site && trustedProxy && proxyHost === domain && permittedDomain && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(domain)) {
     await env.DB.prepare('INSERT OR IGNORE INTO sites (domain, created_at) VALUES (?, ?)')
