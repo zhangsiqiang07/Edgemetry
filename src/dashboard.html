@@ -315,7 +315,11 @@ h2.title { margin:0; font:400 24px/1.15 var(--serif); color:var(--ink); }
 .pop button.leave { color:var(--down); }
 /* The switcher carries a domain, a 30-day count and a sparkline on one line, and
    an input wide enough to type a hostname into below them. */
-.pop.sites { min-width:330px; }
+.pop.sites { min-width:330px;
+  max-height:min(560px, calc(100vh - 100px));
+  max-height:min(560px, calc(100dvh - 100px));
+  overflow-y:auto; overscroll-behavior:contain; }
+.pop.sites > * { flex-shrink:0; }
 .pop button[aria-current="true"] { background:var(--signal-tint); }
 .pop .pop-foot { display:flex; align-items:center; gap:7px; padding:8px 6px 4px;
   margin-top:4px; border-top:1px solid var(--line-2); }
