@@ -763,6 +763,7 @@
       site: SITE,
       range: range,
       filters: filters,
+      components: { current: series, previous: previousSeries },
       totals: summarize(totalsFrom(series)),
       previous: previousSeries ? summarize(totalsFrom(previousSeries)) : null,
       series: {
