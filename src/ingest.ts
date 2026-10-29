@@ -184,7 +184,11 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
 
   const now = Math.floor(Date.now() / 1000);
   const parts = partsForTs(now);
-  const ip = request.headers.get('cf-connecting-ip') ?? '';
+  // Only our authenticated Nginx proxy may supply the original visitor IP.
+  const proxySecret = (env as Env & { NGINX_PROXY_SECRET?: string }).NGINX_PROXY_SECRET;
+  const trustedProxy = Boolean(proxySecret) && request.headers.get('x-edgemetry-proxy-token') === proxySecret;
+  const ip = (trustedProxy ? request.headers.get('x-edgemetry-client-ip') : null)
+    || request.headers.get('cf-connecting-ip') || '';
   const visitor = await computeVisitor(env.DB, parts, site.id, ip, userAgent);
 
   const { browser, os, device } = parseUa(userAgent);
