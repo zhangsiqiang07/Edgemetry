@@ -10,3 +10,16 @@ assert.throws(()=>ctx.aggregateSummary([{components:null}]));
 assert.throws(()=>ctx.aggregateBuckets([[row(1,1,0,0)],[{...row(1,1,0,0),label:'2026-10-28'}]]));
 let active=0,peak=0;const results=await ctx.mapSitesLimited([1,2,3,4,5,6,7],async n=>{active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,2));active--;return n*2;});assert.equal(peak,3);assert.equal(JSON.stringify(results),'[2,4,6,8,10,12,14]');
 console.log('Passed: frontend syntax, weighted totals and trends, comparisons, zero traffic, unavailable data, bucket alignment, bounded concurrency and stable result ordering.');
+// Reproduce one transient network failure, then verify recovery and a shared budget.
+const requestCode=s.slice(s.indexOf('/* Shared read queue:'),s.indexOf('/** Which rankings'));
+let attempts=0;
+const network=vm.createContext({Map,Promise,AbortController,setTimeout,clearTimeout,location:{},fetch:async()=>{if(++attempts===1)throw new TypeError('Failed to fetch');return {status:200,ok:true,json:async()=>({ok:true})};}});
+vm.runInContext(requestCode,network);assert.equal((await network.get('/transient')).ok,true);assert.equal(attempts,2);
+active=0;peak=0;let calls=0;
+network.fetch=async()=>{calls++;active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,2));active--;return {status:200,ok:true,json:async()=>({ok:true})};};
+await Promise.all([...Array.from({length:44},(_,i)=>network.get('/summary/'+i)),...Array.from({length:44},(_,i)=>network.get('/live/'+i))]);assert.equal(peak,3);assert.equal(calls,88);
+calls=0;await Promise.all([network.get('/same'),network.get('/same')]);assert.equal(calls,1);
+network.fetch=async()=>{calls++;return {status:403,ok:false,json:async()=>({error:'forbidden'})};};calls=0;await assert.rejects(network.get('/denied'),/forbidden/);assert.equal(calls,1);
+network.fetch=async()=>{calls++;throw new TypeError('Failed to fetch');};calls=0;await assert.rejects(network.get('/offline'),/网络请求已重试/);assert.equal(calls,3);
+network.fetch=async()=>({status:401,ok:false});await assert.rejects(network.get('/expired'),/unauthorized/);assert.equal(network.location.href,'/login');
+console.log('Passed: transient network recovery, 88 concurrent reads capped at 3, deduplication, no retry on 403/401, bounded retries and actionable failure.');
