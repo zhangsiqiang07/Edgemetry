@@ -166,9 +166,21 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
   }
 
   const domain = normalizeDomain(payload.d);
-  const site = await env.DB.prepare('SELECT id FROM sites WHERE domain = ?')
+  // Only our authenticated Nginx proxy may supply the original visitor IP.
+  const proxySecret = (env as Env & { NGINX_PROXY_SECRET?: string }).NGINX_PROXY_SECRET;
+  const trustedProxy = Boolean(proxySecret) && request.headers.get('x-edgemetry-proxy-token') === proxySecret;
+  let site = await env.DB.prepare('SELECT id FROM sites WHERE domain = ?')
     .bind(domain)
     .first<{ id: number }>();
+
+  // Wildcard Nginx servers discover concrete hosts on their first trusted beacon.
+  const permittedDomain = ['mrqiang.top', 'aflyblue.cn'].some((suffix) => domain === suffix || domain.endsWith('.' + suffix));
+  const proxyHost = normalizeDomain(request.headers.get('x-edgemetry-site-host') ?? '');
+  if (!site && trustedProxy && proxyHost === domain && permittedDomain && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(domain)) {
+    await env.DB.prepare('INSERT OR IGNORE INTO sites (domain, created_at) VALUES (?, ?)')
+      .bind(domain, Math.floor(Date.now() / 1000)).run();
+    site = await env.DB.prepare('SELECT id FROM sites WHERE domain = ?').bind(domain).first<{ id: number }>();
+  }
 
   // A clear 404 here is worth the enumeration risk: "I pasted the snippet and
   // nothing showed up" is the single most common self-hosting failure, and the
@@ -184,9 +196,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
 
   const now = Math.floor(Date.now() / 1000);
   const parts = partsForTs(now);
-  // Only our authenticated Nginx proxy may supply the original visitor IP.
-  const proxySecret = (env as Env & { NGINX_PROXY_SECRET?: string }).NGINX_PROXY_SECRET;
-  const trustedProxy = Boolean(proxySecret) && request.headers.get('x-edgemetry-proxy-token') === proxySecret;
+
   const ip = (trustedProxy ? request.headers.get('x-edgemetry-client-ip') : null)
     || request.headers.get('cf-connecting-ip') || '';
   const visitor = await computeVisitor(env.DB, parts, site.id, ip, userAgent);
