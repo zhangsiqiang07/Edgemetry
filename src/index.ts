@@ -223,6 +223,32 @@ app.onError((err, c) => {
 app.options('/api/event', () => corsPreflight());
 app.post('/api/event', (c) => handleIngest(c.req.raw, c.env));
 
+/* Restricted Nginx discovery: no dashboard session or management privileges. */
+app.post('/__nginx/sites/sync', async (c) => {
+  const secret = (c.env as Env & { NGINX_PROXY_SECRET?: string }).NGINX_PROXY_SECRET;
+  if (!secret || c.req.header('x-edgemetry-proxy-token') !== secret) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+  const raw = await c.req.text();
+  if (raw.length > 8192) return c.json({ error: 'payload too large' }, 413);
+  let body: { domains?: unknown };
+  try { body = JSON.parse(raw); } catch { return c.json({ error: 'invalid JSON' }, 400); }
+  if (!body || !Array.isArray(body.domains) || body.domains.length > 100) {
+    return c.json({ error: 'invalid domains' }, 400);
+  }
+  const domains = [...new Set(body.domains.map((d: unknown) => normalizeDomain(String(d))))];
+  if (domains.some((d) => !DOMAIN_PATTERN.test(d) || !(d === 'mrqiang.top' || d.endsWith('.mrqiang.top')))) {
+    return c.json({ error: 'domain outside permitted scope' }, 400);
+  }
+  const created: string[] = [];
+  for (const domain of domains) {
+    const result = await c.env.DB.prepare('INSERT OR IGNORE INTO sites (domain, created_at) VALUES (?, ?)')
+      .bind(domain, Math.floor(Date.now() / 1000)).run();
+    if (result.meta.changes > 0) created.push(domain);
+  }
+  return c.json({ domains, created });
+});
+
 /* -------------------------------------------------------------- sessions -- */
 
 app.use('/api/*', async (c, next) => {
