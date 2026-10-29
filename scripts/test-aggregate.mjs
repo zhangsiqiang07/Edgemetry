@@ -1,0 +1,12 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const s=fs.readFileSync(new URL('../src/dashboard.html',import.meta.url),'utf8');new vm.Script(s.match(/<script[^>]*>([\s\S]*)<\/script>/)[1]);
+const ctx=vm.createContext({URLSearchParams});vm.runInContext(s.slice(s.indexOf('/* all-site aggregation:'),s.indexOf('/* end all-site aggregation */')),ctx);
+const row=(views,visits,bounces,duration)=>({label:'2026-10-29',views,visits,bounces,duration});
+const item=(b,p)=>({range:{prevLabel:'previous'},meta:{ms:2,colo:'NRT'},components:{current:[b],previous:p?[p]:null}});
+const a=ctx.aggregateSummary([item(row(10,1,1,100),row(2,1,0,10)),item(row(20,9,0,90),row(8,3,2,50))]);
+assert.equal(a.totals.views,30);assert.equal(a.totals.visitors,10);assert.equal(a.totals.bounce,10);assert.equal(a.totals.time,19);assert.equal(a.totals.vpv,3);assert.equal(a.previous.bounce,50);assert.equal(a.previous.time,15);assert.equal(a.series.cur.time[0],19);
+const empty=ctx.aggregateSummary([item(row(0,0,0,0))]);assert.equal(empty.totals.bounce,0);assert.equal(empty.previous,null);
+assert.throws(()=>ctx.aggregateSummary([{components:null}]));
+assert.throws(()=>ctx.aggregateBuckets([[row(1,1,0,0)],[{...row(1,1,0,0),label:'2026-10-28'}]]));
+let active=0,peak=0;const results=await ctx.mapSitesLimited([1,2,3,4,5,6,7],async n=>{active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,2));active--;return n*2;});assert.equal(peak,3);assert.equal(JSON.stringify(results),'[2,4,6,8,10,12,14]');
+console.log('Passed: frontend syntax, weighted totals and trends, comparisons, zero traffic, unavailable data, bucket alignment, bounded concurrency and stable result ordering.');
